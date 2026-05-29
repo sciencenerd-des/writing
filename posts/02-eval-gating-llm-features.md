@@ -1,114 +1,170 @@
-# Eval-gating an LLM feature: from "seems to work" to a CI check
+# Eval-Gating an LLM Feature: From "Seems to Work" to a Hard CI Check
 
-*LLM demos rot silently. Here's how I turned a fuzzy "it usually catches the bad
-invoices" into a hard pass/fail gate that runs in CI with no API key.*
+*LLM demos rot silently. Here is how I turned a fuzzy "it usually catches the bad invoices" feeling into a strict pass/fail gate that runs in CI without an API key.*
 
 ---
 
-The dirty secret of LLM features is that they degrade invisibly. You tweak a
-prompt, bump a model version, refactor a parser — and nothing throws. The thing
-still *runs*. It's just quietly worse, and you find out from a user.
+The dirtiest open secret in AI engineering is that LLM features degrade
+invisibly.
 
-Traditional tests don't catch this well, because the interesting behaviour is
-statistical ("does it catch the anomalies?") rather than a single assertion. The
-fix is to treat the behaviour as a **labelled evaluation** and gate on a metric.
+You change one adjective in a prompt, upgrade a model, or refactor a parser. The
+endpoint still returns `200 OK`. Nothing crashes. But somewhere inside the
+system, it may now be slightly worse at catching important anomalies.
 
-Here's how [Bharat Doc Intelligence](https://github.com/sciencenerd-des/openai-ai-deployment-portfolio)
-does it for its GST audit layer.
+That is how production AI systems fail: quietly, and then all at once.
 
-## 1. Separate the two things you're evaluating
+To ship with confidence, you have to move beyond manual vibe-checks. Treat the
+system's behavior as a labeled evaluation dataset, measure it, and make the
+build fail when the metric slips.
 
-There are two distinct questions, and conflating them is a common mistake:
+Here is how I set that up for the audit layer of
+[Bharat Doc Intelligence](https://github.com/sciencenerd-des/openai-ai-deployment-portfolio).
 
-1. **Did the model extract the document correctly?** (perception — needs real
-   documents, ground-truth fields, fuzzy scoring)
-2. **Given correct extraction, did the logic flag the right problems?**
-   (judgement — deterministic, cheap, exhaustively checkable)
+## 1. Separate perception from judgment
 
-The judgement layer is where bugs are most dangerous *and* most testable, so
-that's what I gate hardest. It's pure Python, so its eval needs no model at all.
+A common mistake is testing an AI feature as one opaque blob. This mixes two
+different problems:
 
-## 2. Make it a labelled multi-label task
+1. **Perception:** did the model read the document correctly?
+2. **Judgment:** given extracted data, did the business logic flag the right
+   violations?
 
-Each case lists the anomaly *codes* a correct validator should raise:
+The perception layer is probabilistic. It needs real document images, model
+calls, field-level scoring, and tolerance for small formatting differences.
+
+The judgment layer is deterministic. Given the same extracted data, it should
+always return the same anomaly codes. That makes it cheap and valuable to gate on
+every commit.
+
+For a compliance tool, business-logic bugs are both dangerous and easy to test.
+So the repo gates them hard.
+
+## 2. Build a labeled multi-label dataset
+
+Each eval case contains a structured invoice payload and the exact anomaly codes
+the validator should emit.
 
 ```json
 [
-  { "name": "clean_intrastate_invoice", "expected_codes": [], "doc": { … } },
-  { "name": "bad_gstin_checksum", "expected_codes": ["gstin_invalid"], "doc": { … } },
-  { "name": "line_amount_mismatch",
-    "expected_codes": ["line_amount_mismatch", "subtotal_mismatch"], "doc": { … } },
-  …
+  {
+    "name": "clean_intrastate_invoice",
+    "expected_codes": [],
+    "doc": {
+      "document_type": "tax_invoice",
+      "supplier_gstin": "27AAPFU0939F1ZV"
+    }
+  },
+  {
+    "name": "bad_gstin_checksum",
+    "expected_codes": ["gstin_invalid"],
+    "doc": {
+      "document_type": "tax_invoice",
+      "supplier_gstin": "29AAAAA0000A1Z9"
+    }
+  }
 ]
 ```
 
-Then score detection as a multi-label problem — precision, recall, F1 across
-codes, plus exact-match per case:
+The eval harness loads each case into the same Pydantic model used by the app,
+runs the validator, and compares the detected codes to the label.
 
 ```python
 for case in cases:
-    detected = {a.code for a in validate_document(ExtractedInvoice(**case["doc"]))}
+    doc = ExtractedInvoice.model_validate(case["doc"])
+    detected = {a.code for a in validate_document(doc)}
     expected = set(case["expected_codes"])
+
     tp += len(detected & expected)
     fp += len(detected - expected)
     fn += len(expected - detected)
-    exact += (detected == expected)
+    exact += int(detected == expected)
 ```
 
-Exact-match is the strict one: it punishes *both* misses and false alarms. For a
-compliance tool, a false alarm (flagging a clean invoice) erodes trust as much as
-a miss, so I want it at 100% on the curated set.
+The harness reports precision, recall, F1, and exact-match accuracy.
 
-## 3. Turn the metric into a gate
+## 3. Make exact-match unforgiving
 
-The harness exits non-zero if exact-match accuracy drops below a threshold — so
-it behaves like a test:
+Exact-match is intentionally strict. It punishes both missed errors and false
+alarms.
+
+That matters in compliance software. A false negative lets bad data through. A
+false positive makes users stop trusting the system. The evaluator should care
+about both.
+
+For the curated regression set, the threshold is set to perfection:
 
 ```python
-THRESHOLD = 1.0   # require perfection on the curated set
-if exact_match < THRESHOLD:
-    print(f"FAIL: exact-match {exact_match:.0%} < {THRESHOLD:.0%}")
+THRESHOLD = 1.0
+
+if result["exact_match"] < THRESHOLD:
+    print("FAIL: exact-match dropped below threshold")
     raise SystemExit(1)
 ```
 
-## 4. Wire it into CI — with no secrets
+If one historical regression case breaks, CI fails.
 
-Because the judgement layer is deterministic and the whole app has a mock mode,
-CI runs the full suite and the evals with **no API key**:
+## 4. Run the gate with no secrets
+
+The project has a zero-key mock mode, so GitHub Actions can run the tests and
+evals without OpenAI or GSTN credentials.
 
 ```yaml
-# .github/workflows/ci.yml
-env:
-  USE_MOCK: "1"
-steps:
-  - run: pip install -r requirements-dev.txt
-  - run: pytest -q
-  - run: python -m evals.run_evals    # exits non-zero if accuracy regresses
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      USE_MOCK: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q
+      - run: python -m evals.run_evals --write
 ```
 
-Now a prompt change that accidentally breaks the contract, or a refactor that
-drops a check, fails the build instead of shipping.
+This is the important practical detail: if an evaluation suite is expensive or
+annoying to run, it will not be run often enough. The deterministic audit eval is
+fast, free, and runs on every push.
 
-## 5. What about evaluating the *model*?
+## 5. Evaluate model perception separately
 
-The model-perception eval is the harder, more expensive half — it needs real
-labelled scans and fuzzy field-level scoring, and it costs tokens to run. The
-pattern there is the same shape (labelled set, metric, threshold) but you run it
-on a schedule or pre-release rather than on every push, and you compare models
-(`gpt-4o-mini` vs a frontier model) on the same set to make upgrade decisions
-with data instead of vibes.
+The model-reading layer still needs evaluation. It is just a different kind of
+evaluation.
 
-## The takeaway
+For perception evals, use the same general shape — labeled examples, metrics,
+thresholds — but change the operating model:
 
-- Split *perception* evals from *logic* evals; gate the logic hard and cheap.
-- Express behaviour as a labelled set + a metric + a threshold.
-- Exact-match punishes false positives, which matters for trust.
-- Mock mode makes the gate free, so it can live on every push.
+- run them on a schedule or release-candidate branch;
+- use fuzzy scoring for text fields;
+- compare model versions against the same labeled image set;
+- use the results to choose upgrades based on data rather than vibes.
 
-An LLM feature without an eval gate isn't done — it's just untested code that
-happens to demo well today.
+Do not mix that noisy, token-consuming evaluation with the deterministic logic
+gate that should run on every commit.
+
+## The engineering takeaway
+
+Moving past prototype demos means treating AI systems like software:
+
+- isolate probabilistic perception from deterministic business logic;
+- express expected behavior as labeled examples;
+- choose a metric and make regressions fail loudly;
+- keep the critical gate cheap enough to run in CI.
+
+An AI feature without an automated evaluation gate is not finished. It is just a
+demo that happens to work today.
 
 ---
 
 *Eval harness, dataset, and CI config:
 [github.com/sciencenerd-des/openai-ai-deployment-portfolio/tree/main/evals](https://github.com/sciencenerd-des/openai-ai-deployment-portfolio/tree/main/evals)*
+

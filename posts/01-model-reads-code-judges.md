@@ -1,31 +1,39 @@
-# Model reads, code judges: a multimodal agent you can actually trust
+# Model Reads, Code Judges: A Multimodal Agent You Can Actually Trust
 
-*How I built a GST-invoice agent on the OpenAI Agents SDK where the model never gets to decide whether the maths is right.*
+*How I built a GST-invoice agent using the OpenAI Agents SDK where the model handles messy reality, but code keeps the final veto.*
 
 ---
 
-Large language models are extraordinary at *reading* messy real-world documents —
-a crumpled thermal-printed invoice, a photo taken at an angle, a bill half in
-Hindi. They are also, stubbornly, not something you want certifying that
-`2 × 299 = 598`. For a compliance tool that decides whether a business can claim
-a tax credit, "the model said the totals add up" is not an acceptable answer.
+Large language models are extraordinary at *reading* chaotic real-world
+documents. They do not blink at a crumpled thermal receipt, a smartphone photo
+taken at a bad angle, or a bill written partly in Hindi and partly in English.
 
-So the design principle for [Bharat Doc Intelligence](https://github.com/sciencenerd-des/openai-ai-deployment-portfolio)
-is one line:
+But as good as they are at perception, they are not the right authority for basic
+arithmetic or compliance judgment. You do not want a frontier model certifying
+that `2 * 299 = 598`. It might get it right most of the time, but for a tool
+deciding whether a business can legally claim a tax credit, "the model
+hallucinated the math" is not an acceptable audit explanation.
 
-> **The model reads the document into a typed schema. Deterministic Python judges
-> whether it's correct.**
+When building [Bharat Doc Intelligence](https://github.com/sciencenerd-des/openai-ai-deployment-portfolio),
+I used one architectural boundary everywhere:
 
-This post walks through how that split works in practice, and why it's the right
-shape for most "AI + structured data" features — not just tax documents.
+> **The model's job is to read unstructured reality into a strictly typed schema.
+> Deterministic Python code's job is to judge whether that data is actually
+> correct.**
 
-## 1. Describe the answer before you call the model
+That split gives you the best of both worlds: the flexibility of an LLM at the
+messy input boundary and the reliability of unit-tested code at the decision
+boundary.
 
-The first thing is a Pydantic model of *what a read document is*. The Agents SDK
-will hold the model to this shape via `output_type`, which removes an entire class
-of brittle JSON-parsing glue.
+## 1. Establish the ground rules with typed schemas
+
+Before calling a model, define exactly what a successful extraction looks like.
+The app uses Pydantic models to make the invoice structure explicit.
 
 ```python
+from pydantic import BaseModel
+from typing import Literal
+
 class LineItem(BaseModel):
     description: str
     hsn_sac: str | None = None
@@ -41,17 +49,23 @@ class ExtractedInvoice(BaseModel):
     total_tax: float | None = None
     grand_total: float | None = None
     detected_language: str | None = None
-    # …
 ```
 
-## 2. The agent reads — and can self-check, but can't self-certify
+Passing this schema into the OpenAI Agents SDK as `output_type` forces the model
+to return the application contract. It removes a whole class of brittle regexes,
+ad hoc JSON parsing, and "hope the model formatted this correctly" code.
+
+## 2. Let the agent inspect, but not certify
+
+The extraction agent is allowed to use helper tools while reading the document,
+but it does not own the final verdict.
 
 ```python
 from agents import Agent, Runner, function_tool
 
 @function_tool
 def validate_gstin(gstin: str) -> str:
-    ok, reason = _validate_gstin(gstin)         # pure-Python checksum
+    ok, reason = _validate_gstin(gstin)
     return f"{'VALID' if ok else 'INVALID'}: {reason}"
 
 agent = Agent(
@@ -63,89 +77,109 @@ agent = Agent(
 )
 ```
 
-Two deliberate choices:
+The distinction matters. `validate_gstin` is exposed as a tool so the model can
+notice a GST number problem during extraction. But the tool returns a string into
+the model context. It does not let the model overwrite the downstream audit
+state.
 
-- `output_type=ExtractedInvoice` constrains the model to the schema.
-- `validate_gstin` is a **tool**, so the model can check a GST number mid-read —
-  but notice it returns a *string for the model to read*, not a verdict the model
-  gets to overwrite. The authoritative check happens later, in code.
+The system prompt also tells the model to **transcribe, not fix**. If an invoice
+physically prints the wrong line amount, the correct extraction is the wrong
+printed value. Correcting the merchant's bad math would defeat the purpose of an
+auditing tool. We need to preserve the flaw to catch the flaw.
 
-The instructions tell the model to **transcribe, not fix**: "Write numbers exactly
-as printed; do not 'correct' arithmetic." You want the model to faithfully report
-that the invoice says `698` even when `2 × 299 = 598` — because catching that
-discrepancy is the whole point.
+## 3. Feed messy pixels through the Responses API
 
-## 3. Pass the image through the Responses API
-
-The Agents SDK accepts Responses-API input items, so a multimodal read is just a
-`user` message mixing text and an image:
+The Agents SDK can accept multimodal input items. A document read is just a user
+message containing text plus a base64 image:
 
 ```python
 content = [
-    {"type": "input_text", "text": "Extract all fields from this document."},
+    {"type": "input_text", "text": "Extract all fields from this document exactly as printed."},
     {"type": "input_image", "image_url": f"data:image/png;base64,{b64}", "detail": "high"},
 ]
 result = await Runner.run(agent, [{"role": "user", "content": content}])
 invoice = result.final_output_as(ExtractedInvoice)
 ```
 
-## 4. Now code judges — and it's the part that can't lie
+At that moment, the AI's job is finished. It has turned messy input into a
+structured Python object. Now deterministic code takes over.
 
-Everything that constitutes a *claim about correctness* lives in pure functions
-with no model in the loop. They're fast, free, and exhaustively unit-tested.
+## 4. Put judgment where code cannot lie
+
+Every claim about mathematical correctness, GSTIN validity, or compliance risk
+lives in ordinary Python functions. No model call. No prompt dependency. No
+random variation.
 
 ```python
 def validate_document(doc: ExtractedInvoice) -> list[Anomaly]:
     anomalies = []
-    # GSTIN checksum (the GSTN modulo-36 algorithm) — a check the model can't fake
+
     if doc.supplier_gstin:
         ok, reason = validate_gstin(doc.supplier_gstin)
         if not ok:
-            anomalies.append(Anomaly("gstin_invalid", "error", reason, "supplier_gstin"))
-    # line-item arithmetic
-    for i, it in enumerate(doc.line_items):
-        if it.amount and abs(it.quantity * it.unit_price - it.amount) > 1:
-            anomalies.append(Anomaly("line_amount_mismatch", "warning", ..., f"line_items[{i}]"))
-    # subtotal + tax == grand total, CGST == SGST, IGST not mixed with CGST/SGST …
+            anomalies.append(Anomaly(
+                code="gstin_invalid",
+                severity="error",
+                message=reason,
+                field="supplier_gstin",
+            ))
+
+    for i, item in enumerate(doc.line_items):
+        expected = round(item.quantity * item.unit_price, 2)
+        if item.amount and abs(expected - item.amount) > 1:
+            anomalies.append(Anomaly(
+                code="line_amount_mismatch",
+                severity="warning",
+                message="quantity * unit_price does not equal printed amount",
+                field=f"line_items[{i}]",
+            ))
+
     return anomalies
 ```
 
-The GSTIN checksum is the clearest example of why this split matters: it's a
-deterministic modulo-36 calculation. A model can *guess* whether a GSTIN looks
-valid; code can *prove* it. So code does.
+GSTIN validation is the cleanest example. A GSTIN contains a modulo-36 checksum.
+An LLM can only guess whether a GSTIN looks plausible. Python can prove whether
+the checksum is valid in under a millisecond.
 
-## 5. Make it runnable with no key
+So code does the proving.
 
-The single highest-leverage thing for a demo: wrap the model call so the whole
-pipeline falls back to deterministic fixtures when there's no `OPENAI_API_KEY`.
+## 5. Make local runs boring
+
+If you want reviewers to trust a project, make it easy to run. This repo falls
+back to deterministic mock fixtures when no `OPENAI_API_KEY` is present.
 
 ```python
 def _extract(image_bytes, text, mime):
     if settings.use_mock:
         return mock_extract(text)
-    from .agent import run_extraction        # lazy import: SDK only needed live
+
+    from .agent import run_extraction
     return asyncio.run(run_extraction(image_bytes=image_bytes, text=text, mime=mime))
 ```
 
-Now a reviewer clones the repo and runs the entire app, UI, tests, and evals in
-one command, for free. CI does too.
+That small boundary makes the developer experience dramatically better. A
+reviewer can clone the repo, run the UI, execute tests, and run evals without
+configuring secrets or spending tokens. CI can do the same thing.
 
-## Why this generalises
+## Why this pattern generalizes
 
-This pattern — **perception by the model, judgement by code** — applies far beyond
-invoices:
+This perception-vs-judgment pattern applies to many enterprise AI features:
 
-- Extracting fields from contracts? Let code enforce that dates are ordered and
-  amounts reconcile.
-- Parsing logs into incidents? Let code validate severity thresholds.
-- Any time an LLM produces structured data that downstream systems *act on*, the
-  acting decision should be a deterministic function of that data, not a second
-  opinion from the model.
+- **Contract analysis:** let the model extract clauses and dates; let code enforce
+  policy rules and date windows.
+- **System log triage:** let the model summarize noisy logs; let code decide
+  whether thresholds page an engineer.
+- **E-commerce cataloging:** let the model read a manufacturer spec sheet; let
+  code validate dimensions, weights, and shipping constraints.
 
-The model gives you reach into messy, unstructured, multilingual reality. Code
+Whenever an LLM output drives an operational action, the action should be a
+deterministic function of validated data.
+
+The model gives you reach into messy, multilingual, unstructured reality. Code
 gives you a verdict you can defend. Keep them in their lanes.
 
 ---
 
-*Full source, evals, and a one-command mock mode:
+*Full source, evals, and mock mode:
 [github.com/sciencenerd-des/openai-ai-deployment-portfolio](https://github.com/sciencenerd-des/openai-ai-deployment-portfolio)*
+
