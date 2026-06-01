@@ -16,6 +16,12 @@ multimodal agents, and eval-driven development. Code-first, no hype.
    Turning fuzzy "it usually works" into a labelled eval with a pass/fail
    threshold that runs in CI with no API key.
 
-More in progress. The projects these draw from:
+3. **[Building Reliable OpenAI Document Apps with Validation Layers](posts/03-building-reliable-openai-document-apps.md)**
+   A practical pattern for using OpenAI for extraction while deterministic code handles business correctness.
+
+4. **[Mock-first AI Development](posts/04-mock-first-ai-development.md)**
+   Why AI apps should run locally and in CI without API keys.
+
+The projects these draw from:
 [Bharat Doc Intelligence](https://github.com/sciencenerd-des/openai-ai-deployment-portfolio)
 · [Financial Agents](https://github.com/sciencenerd-des/Financial_Agents).
