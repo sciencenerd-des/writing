@@ -25,3 +25,15 @@ multimodal agents, and eval-driven development. Code-first, no hype.
 The projects these draw from:
 [Bharat Doc Intelligence](https://github.com/sciencenerd-des/openai-ai-deployment-portfolio)
 · [Financial Agents](https://github.com/sciencenerd-des/Financial_Agents).
+
+## Case studies
+
+Structured, academic retrospectives on the projects I built or studied — problem,
+design, engineering decisions, how I worked with the AI tooling, verification, and
+learnings. Index: [`case-studies/`](case-studies/README.md).
+
+- [Bharat Doc Intelligence](case-studies/bharat-doc-intelligence.md) — model reads, code judges
+- [Financial Agents](case-studies/financial-agents.md) — approval-gated multi-agent orchestration
+- [AI Task Manager](case-studies/ai-task-manager.md) — a safe AI feature with a zero-key fallback
+- [MiniMythos](case-studies/minimythos.md) — a reproducible research harness
+- [Studying primary sources](case-studies/studying-agentic-primary-sources.md) — learning by extending reference implementations
