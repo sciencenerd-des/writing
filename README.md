@@ -7,6 +7,10 @@ multimodal agents, and eval-driven development. Code-first, no hype.
 
 ## Posts
 
+0. **[Use Codex to investigate why a failed command looks green](posts/05-codex-verification-not-just-green-tests.md)**
+   Reproduce a shell-pipeline false pass using Forge's real auditor helper,
+   then use Codex to inspect negative controls and the limits of the fix.
+
 1. **[Model reads, code judges: a multimodal agent you can actually trust](posts/01-model-reads-code-judges.md)**
    How to split an AI document feature so the model handles perception and
    deterministic code makes every correctness call. OpenAI Agents SDK · Responses
@@ -27,6 +31,9 @@ The projects these draw from:
 · [Financial Agents](https://github.com/sciencenerd-des/Financial_Agents).
 
 ## Case studies
+
+- [Forge](case-studies/forge.md) — a focused verification mechanism, a
+  reproducible demo, and explicit limits on what the evidence proves.
 
 Structured, academic retrospectives on the projects I built or studied — problem,
 design, engineering decisions, how I worked with the AI tooling, verification, and

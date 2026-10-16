@@ -13,6 +13,9 @@ The through-line across all of them is a single conviction:
 
 ## Case studies
 
+- **[Forge](forge.md)** — inspecting a real coding-agent verification failure
+  with reproducible negative and positive controls.
+
 1. **[Bharat Doc Intelligence](bharat-doc-intelligence.md)** — a multimodal GST
    document agent where the model reads and deterministic code judges.
 2. **[Financial Agents](financial-agents.md)** — a five-agent mesh with
